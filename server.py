@@ -12,7 +12,7 @@ from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
 
 from . import database, openfoodfacts_client
-from observability import configure_tracing, traced_tool
+from observability import configure_tracing, traced_tool, wrap_asgi_app
 
 _PACKAGE_ROOT = Path(__file__).resolve().parent
 _APP_ROOT = _PACKAGE_ROOT.parent
@@ -35,7 +35,8 @@ logging.basicConfig(
 logger = logging.getLogger("mcp_server")
 
 database.init_database()
-configure_tracing()
+# Distinct service name so MCP spans are attributable separately from the agent.
+configure_tracing("fitness-mcp-server")
 
 mcp = FastMCP("health-biometrics-server", host=MCP_HOST, port=MCP_PORT)
 
@@ -220,4 +221,13 @@ def get_daily_biometrics_summary(
 
 
 if __name__ == "__main__":
-    mcp.run(transport="streamable-http")
+    import uvicorn
+
+    # Mirrors FastMCP.run_streamable_http_async(), but wraps the app so the
+    # inbound traceparent is extracted and this server's tool spans join the
+    # caller's trace instead of starting their own.
+    uvicorn.run(
+        wrap_asgi_app(mcp.streamable_http_app()),
+        host=MCP_HOST,
+        port=MCP_PORT,
+    )
