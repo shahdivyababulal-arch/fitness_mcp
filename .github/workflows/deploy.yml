@@ -1,0 +1,92 @@
+name: Deploy fitness MCP server
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+env:
+  PROJECT_ID: travelfitnessa2a
+  REGION: us-central1
+  SERVICE: fitness-mcp
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv sync --frozen
+      # No pytest suite in this repo yet. Importing server.py is side-effect
+      # free, so a failure here is a real import or schema error, not a
+      # missing database.
+      - name: Import and tool-registration check
+        run: |
+          uv run python -c "
+          import server
+          names = sorted(t.name for t in server.mcp._tool_manager.list_tools())
+          expected = ['calculate_tdee_and_macros', 'get_daily_biometrics_summary',
+                      'log_entry', 'search_food_nutrition']
+          assert names == expected, f'tool surface changed: {names}'
+          print('ok:', names)
+          "
+
+  deploy:
+    needs: quality
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write   # required to mint the OIDC token for WIF
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.WIF_PROVIDER }}
+          service_account: ${{ vars.DEPLOY_SA }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Deploy to Cloud Run
+        # Private: only the fitness agent's runtime service account holds
+        # roles/run.invoker, and it authenticates with an ID token whose
+        # audience is this service's URL. Runs as the fitness agent's
+        # identity because the two are one trust domain.
+        run: |
+          gcloud run deploy "$SERVICE" \
+            --source . \
+            --region "$REGION" \
+            --project "$PROJECT_ID" \
+            --service-account "fitness-agent@${PROJECT_ID}.iam.gserviceaccount.com" \
+            --no-allow-unauthenticated \
+            --set-env-vars "OTEL_TRACES_EXPORTER=gcp" \
+            --memory 512Mi --cpu 1 --timeout 300 --max-instances 3
+
+      - name: Smoke test
+        # `gcloud auth print-identity-token` does not work here: Workload
+        # Identity Federation yields external-account credentials, which
+        # cannot mint ID tokens. Assert what can be checked without one --
+        # the revision is serving, and anonymous callers are rejected.
+        #
+        # Container health is already proven: `gcloud run deploy` fails
+        # unless the revision passes its health check and becomes Ready.
+        run: |
+          READY=$(gcloud run services describe "$SERVICE" --region "$REGION" \
+            --project "$PROJECT_ID" \
+            --format 'value(status.conditions[0].status)')
+          if [ "$READY" != "True" ]; then
+            echo "service is not Ready (condition=$READY)" >&2
+            exit 1
+          fi
+
+          URL=$(gcloud run services describe "$SERVICE" --region "$REGION" \
+            --project "$PROJECT_ID" --format 'value(status.url)')
+          CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 "$URL/mcp")
+          if [ "$CODE" != "403" ] && [ "$CODE" != "401" ]; then
+            echo "expected the private service to reject anonymous callers, got $CODE" >&2
+            exit 1
+          fi
+          echo "revision Ready; anonymous request correctly rejected ($CODE)"
+          echo "fitness-mcp URL: $URL"
