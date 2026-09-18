@@ -1,0 +1,39 @@
+[project]
+name = "fitness-mcp"
+version = "1.0.0"
+description = "MCP tool server for the fitness agent: nutrition lookup, TDEE/macros, biometrics logging."
+requires-python = ">=3.11"
+
+# Deliberately no google-adk, google-genai, litellm, or a2a-sdk. Those were
+# only ever here because this server shared a requirements.txt with the agent
+# that calls it; nothing in this process imports them. Dropping them takes the
+# dependency tree from ~180 packages to ~50 and cuts the cold start that the
+# agent's MCP client was waiting on.
+dependencies = [
+    "mcp>=1.6,<2",
+    "uvicorn>=0.30",
+    "openfoodfacts>=0.2.0",
+    "python-dotenv>=1.0.0",
+    "PyYAML>=6.0",
+    # gs:// config URIs (MCP_CONFIG_PATH); imported lazily in config.py.
+    "google-cloud-storage>=2.18.0",
+    # Tracing. The 1.42.1 / 0.63b1 pairing is kept because the instrumentation
+    # packages track the SDK minor series and must move together -- not, as it
+    # was in the agent repo, because google-adk caps the SDK at <=1.42.1. This
+    # server is now free of that cap and can move ahead of the agents.
+    "opentelemetry-api==1.42.1",
+    "opentelemetry-sdk==1.42.1",
+    "opentelemetry-exporter-otlp-proto-http==1.42.1",
+    "opentelemetry-instrumentation-asgi==0.63b1",
+    "opentelemetry-exporter-gcp-trace>=1.9.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0",
+]
+
+# A flat application, not an installable library: the modules sit at the repo
+# root and are imported by path, so there is nothing to build a wheel from.
+[tool.uv]
+package = false

@@ -5,17 +5,12 @@ nutriment-normalization details. Swap SDK usage here without touching MCP tools.
 """
 
 from __future__ import annotations
-import os
 from functools import lru_cache
-from pathlib import Path
 from typing import Any, Dict, List
 
 import openfoodfacts
-from dotenv import load_dotenv
 
-load_dotenv(Path(__file__).resolve().parent.parent / ".env")
-
-DEFAULT_USER_AGENT = "ADKHealthAgent/1.0 (contact@example.com)"
+from config import settings
 
 
 def _as_float(value: Any, default: float = 0.0) -> float:
@@ -29,8 +24,7 @@ def _as_float(value: Any, default: float = 0.0) -> float:
 
 @lru_cache(maxsize=1)
 def _api() -> openfoodfacts.API:
-    user_agent = os.getenv("OFF_USER_AGENT", DEFAULT_USER_AGENT)
-    return openfoodfacts.API(user_agent=user_agent)
+    return openfoodfacts.API(user_agent=settings.off_user_agent)
 
 
 def _extract_macros(product: Dict[str, Any]) -> Dict[str, float] | None:

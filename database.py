@@ -7,8 +7,12 @@ import sqlite3
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-# Keep the DB at fitness_agent/fitness_data.db (package parent).
-DB_PATH = Path(__file__).resolve().parent.parent / "fitness_data.db"
+from config import settings
+
+# Configurable so a deployment can point it at a mounted volume; the default
+# sits beside this module. On Cloud Run it lands on the container's writable
+# layer, which means per-instance and lost on restart.
+DB_PATH = Path(settings.db_path)
 
 
 def _connect() -> sqlite3.Connection:

@@ -1,44 +1,27 @@
-"""FastMCP server exposing health and biometrics tools over Streamable HTTP."""
+"""Fitness tool server: health, nutrition and biometrics tools over MCP.
+
+Defines the FastMCP app and the tool registrations only. Process startup --
+logging, tracing, database initialisation, transport selection -- lives in
+main.py, so importing this module has no side effects beyond building the app.
+
+Run it with ``python main.py``.
+"""
 
 from __future__ import annotations
 
 import logging
-import os
-import sys
-from pathlib import Path
 from typing import Any, Dict, Optional
 
-from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
 
-from . import database, openfoodfacts_client
-from observability import configure_tracing, traced_tool, wrap_asgi_app
+import database
+import openfoodfacts_client
+from config import settings
+from observability import traced_tool
 
-_PACKAGE_ROOT = Path(__file__).resolve().parent
-_APP_ROOT = _PACKAGE_ROOT.parent
-load_dotenv(_APP_ROOT / ".env")
-
-MCP_HOST = os.getenv("FITNESS_MCP_HOST", "127.0.0.1")
-MCP_PORT = int(os.getenv("FITNESS_MCP_PORT", "8003"))
-
-# Keep protocol traffic separate from application logs.
-LOG_DIR = _APP_ROOT / "logs"
-LOG_DIR.mkdir(exist_ok=True)
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] [SERVER] %(message)s",
-    handlers=[
-        logging.FileHandler(LOG_DIR / "agent.log", mode="a", encoding="utf-8"),
-        logging.StreamHandler(sys.stderr),
-    ],
-)
 logger = logging.getLogger("mcp_server")
 
-database.init_database()
-# Distinct service name so MCP spans are attributable separately from the agent.
-configure_tracing("fitness-mcp-server")
-
-mcp = FastMCP("health-biometrics-server", host=MCP_HOST, port=MCP_PORT)
+mcp = FastMCP(settings.name, host=settings.mcp_host, port=settings.mcp_port)
 
 
 @mcp.tool()
@@ -218,16 +201,3 @@ def get_daily_biometrics_summary(
         summary["goal"] = targets["goal"]
 
     return summary
-
-
-if __name__ == "__main__":
-    import uvicorn
-
-    # Mirrors FastMCP.run_streamable_http_async(), but wraps the app so the
-    # inbound traceparent is extracted and this server's tool spans join the
-    # caller's trace instead of starting their own.
-    uvicorn.run(
-        wrap_asgi_app(mcp.streamable_http_app()),
-        host=MCP_HOST,
-        port=MCP_PORT,
-    )

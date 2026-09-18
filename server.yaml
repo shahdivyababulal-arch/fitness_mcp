@@ -1,0 +1,31 @@
+# Declarative configuration for the fitness MCP server.
+#
+# Every value here can be overridden by the environment variable named in
+# config.py, so Cloud Run supplies deploy-time values without a second config
+# source. MCP_CONFIG_PATH may point at a local path or a gs:// URI.
+
+name: health-biometrics-server
+
+server:
+  # Loopback by default so a local run is not exposed on the network. The
+  # container sets FITNESS_MCP_HOST=0.0.0.0 -- Cloud Run routes to the
+  # published port from outside the container's network namespace, so binding
+  # loopback there makes the service unreachable and the probe fail.
+  host: 127.0.0.1
+  port: 8003
+
+data:
+  # SQLite on the container's writable layer: per-instance and lost on
+  # restart. Fine for logged entries in a demo; point this at a mounted
+  # volume if the log has to survive a revision.
+  db_path: fitness_data.db
+  # Open Food Facts asks every client to identify itself. Requests with a
+  # generic user agent are rate-limited harder.
+  off_user_agent: ADKHealthAgent/1.0 (contact@example.com)
+
+observability:
+  enabled: true
+  service_name: fitness-mcp
+  # Jaeger's OTLP/HTTP receiver for local runs. In Cloud Run this is ignored:
+  # OTEL_TRACES_EXPORTER=gcp selects the Cloud Trace exporter instead.
+  otlp_endpoint: http://127.0.0.1:4318
