@@ -55,7 +55,7 @@ def main(argv: list[str] | None = None) -> int:
 
     configure_tracing(settings.otel_service_name)
 
-    import database
+    from tools import database
 
     database.init_database()
 

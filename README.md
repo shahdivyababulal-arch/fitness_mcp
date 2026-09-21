@@ -14,8 +14,8 @@ it answers tool calls and nothing else.
 |---|---|
 | `main.py` | Process entrypoint: logging, tracing, DB init, transport |
 | `server.py` | FastMCP app and tool registrations (import-safe, no side effects) |
-| `database.py` | SQLite schema and CRUD for biometrics logs |
-| `openfoodfacts_client.py` | Adapter over the Open Food Facts SDK |
+| `tools/database.py` | SQLite schema and CRUD for biometrics logs |
+| `tools/openfoodfacts_client.py` | Adapter over the Open Food Facts SDK |
 | `config.py` | Loads `server.yaml`; env vars override every value |
 | `observability.py` | Tool spans and OpenTelemetry bootstrap |
 

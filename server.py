@@ -14,8 +14,7 @@ from typing import Any, Dict, Optional
 
 from mcp.server.fastmcp import FastMCP
 
-import database
-import openfoodfacts_client
+from tools import database, openfoodfacts_client
 from config import settings
 from observability import traced_tool
 
