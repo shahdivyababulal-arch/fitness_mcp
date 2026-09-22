@@ -117,7 +117,24 @@ def configure_tracing(service_name: str | None = None) -> None:
     os.environ.setdefault("OTEL_TRACES_SAMPLER_ARG", "1.0")
 
     provider = TracerProvider(resource=Resource.create({"service.name": resolved}))
-    provider.add_span_processor(BatchSpanProcessor(CloudTraceSpanExporter()))
+    # Tracing must never prevent the service from starting. The Cloud Trace
+    # exporter resolves application default credentials in its constructor, so
+    # on a machine without ADC -- a CI runner, a developer who has not run
+    # `gcloud auth application-default login` -- this raises
+    # DefaultCredentialsError. The OTLP exporter it replaced constructed
+    # happily and only failed later, at export time, so losing traces used to
+    # be survivable and is again.
+    try:
+        exporter = CloudTraceSpanExporter()
+    except Exception as error:
+        logging.getLogger(__name__).warning(
+            "tracing disabled: cannot create the Cloud Trace exporter (%s: %s). "
+            "Run `gcloud auth application-default login`, or set "
+            "OTEL_ENABLED=false to silence this.",
+            type(error).__name__, error)
+        return
+
+    provider.add_span_processor(BatchSpanProcessor(exporter))
     trace.set_tracer_provider(provider)
     _tracing_configured = True
 
