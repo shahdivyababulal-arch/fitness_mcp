@@ -19,9 +19,10 @@ jobs:
         with:
           enable-cache: true
       - run: uv sync --frozen
-      # No pytest suite in this repo yet. Importing server.py is side-effect
-      # free, so a failure here is a real import or schema error, not a
-      # missing database.
+      - name: Unit tests
+        run: uv run pytest -q
+      # Importing server.py is side-effect free, so a failure here is a real
+      # import or schema error, not a missing database.
       - name: Import and tool-registration check
         run: |
           uv run python -c "

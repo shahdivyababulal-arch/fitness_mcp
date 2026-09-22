@@ -1,7 +1,19 @@
-"""Open Food Facts lookup via the official `openfoodfacts` SDK.
+"""Open Food Facts lookup.
 
 Kept as a thin adapter so `server.py` stays free of product-ranking /
-nutriment-normalization details. Swap SDK usage here without touching MCP tools.
+nutriment-normalization details.
+
+Two different services, because Open Food Facts split them:
+
+  barcode lookup  the SDK's product.get -> /api/v2/product/<code>.json
+  text search     search.openfoodfacts.org (Search-a-licious)
+
+The SDK's `product.text_search` is deliberately not used. It calls the legacy
+`/cgi/search.pl`, which now answers 503 consistently -- not intermittently,
+and not because of the user agent: a barcode fetch with the same headers
+returns 200 in the same second. Text search moved to Search-a-licious and the
+CGI endpoint is on its way out. That 503 is what made the agent invent macros
+and log them, so the endpoint and the honesty of the failure are one fix.
 """
 
 from __future__ import annotations
@@ -9,8 +21,31 @@ from functools import lru_cache
 from typing import Any, Dict, List
 
 import openfoodfacts
+import requests
 
 from config import settings
+
+SEARCH_URL = "https://search.openfoodfacts.org/search"
+
+# Long enough for a slow provider, short enough that a hung lookup does not
+# sit inside a delegation the travel agent is waiting on.
+_SEARCH_TIMEOUT_SECONDS = 15
+
+# Returned with every failure. The model's instinct on a failed nutrition
+# lookup is to fall back on what it "knows" and carry on -- we watched it
+# invent 588 kcal/100g for peanut butter and write the derived total to the
+# database, twice, with different numbers. Saying so in the payload is more
+# reliable than saying it in the prompt alone, because the tool result is
+# what the model is reasoning about at that moment.
+_NO_ESTIMATE = (
+    "Do not substitute typical or remembered values for this item, and do "
+    "not log it. Tell the user the nutrition lookup failed and that they can "
+    "retry or supply a barcode."
+)
+
+
+def _failure(message: str) -> Dict[str, Any]:
+    return {"status": "error", "message": message, "instruction": _NO_ESTIMATE}
 
 
 def _as_float(value: Any, default: float = 0.0) -> float:
@@ -78,6 +113,17 @@ def _extract_macros(product: Dict[str, Any]) -> Dict[str, float] | None:
     }
 
 
+def _significant_tokens(query: str) -> set[str]:
+    """Query words worth matching a product name against.
+
+    Two characters or fewer are dropped: they match almost anything, which
+    defeats the point of the relevance check below.
+    """
+    tokens = {token.strip(",.()") for token in query.lower().split()}
+    significant = {token for token in tokens if len(token) > 2}
+    return significant or {token for token in tokens if token}
+
+
 def _score(product: Dict[str, Any], query_tokens: set[str]) -> tuple[int, int]:
     name = (product.get("product_name") or "").lower()
     token_hits = sum(1 for token in query_tokens if token in name)
@@ -93,7 +139,7 @@ def search_food_nutrition(food_query: str) -> Dict[str, Any]:
     """Looks up nutritional profile per 100g for a grocery/food item."""
     query = (food_query or "").strip()
     if not query:
-        return {"status": "error", "message": "food_query must be a non-empty string."}
+        return _failure("food_query must be a non-empty string.")
 
     # Barcode-looking queries: prefer exact product fetch.
     if query.isdigit() and len(query) >= 8:
@@ -102,14 +148,11 @@ def search_food_nutrition(food_query: str) -> Dict[str, Any]:
             fields=["code", "product_name", "nutriments"],
         )
         if not product:
-            return {"status": "error", "message": f"No product found for barcode '{query}'."}
+            return _failure(f"No product found for barcode '{query}'.")
         macros = _extract_macros(product)
         if macros is None:
             name = product.get("product_name") or query
-            return {
-                "status": "error",
-                "message": f"Found '{name}' but nutriment data is missing.",
-            }
+            return _failure(f"Found '{name}' but nutriment data is missing.")
         return {
             "status": "success",
             "item_name": (product.get("product_name") or query).title(),
@@ -118,13 +161,41 @@ def search_food_nutrition(food_query: str) -> Dict[str, Any]:
             **macros,
         }
 
-    result = _api().product.text_search(query)
-    products: List[Dict[str, Any]] = result.get("products") or []
-    if not products:
-        return {"status": "error", "message": f"No food matching '{query}' found."}
+    try:
+        response = requests.get(
+            SEARCH_URL,
+            params={"q": query, "page_size": 20},
+            headers={"User-Agent": settings.off_user_agent},
+            timeout=_SEARCH_TIMEOUT_SECONDS,
+        )
+        response.raise_for_status()
+        # Search-a-licious calls them `hits`; each one is shaped like a
+        # product, so the ranking and macro extraction below are unchanged.
+        products: List[Dict[str, Any]] = response.json().get("hits") or []
+    except requests.RequestException as error:
+        return _failure(f"The nutrition database is unavailable: {error}")
+    except ValueError as error:
+        return _failure(f"The nutrition database returned malformed data: {error}")
 
-    query_tokens = {token for token in query.lower().split() if token}
-    ranked = sorted(products, key=lambda p: _score(p, query_tokens), reverse=True)
+    if not products:
+        return _failure(f"No food matching '{query}' found.")
+
+    # Search-a-licious always returns its nearest guesses, however far off.
+    # The legacy endpoint returned nothing for a query it did not recognise,
+    # so switching search services introduced a new way to be confidently
+    # wrong: "zzzzqqq not a food" came back as Organic Large Raw Whole
+    # Cashews, complete with macros, which the agent would have logged. A
+    # product whose name shares no word with the query is not a match.
+    query_tokens = _significant_tokens(query)
+    relevant = [p for p in products if _score(p, query_tokens)[0] > 0]
+    if not relevant:
+        best = (products[0].get("product_name") or "?").strip()
+        return _failure(
+            f"No food matching '{query}' found. The nearest result was "
+            f"'{best}', which does not match what was asked for."
+        )
+
+    ranked = sorted(relevant, key=lambda p: _score(p, query_tokens), reverse=True)
 
     for product in ranked:
         macros = _extract_macros(product)
@@ -138,10 +209,7 @@ def search_food_nutrition(food_query: str) -> Dict[str, Any]:
             **macros,
         }
 
-    return {
-        "status": "error",
-        "message": (
-            f"Found products for '{query}' but nutriment data is missing. "
-            "Try a more specific product name or barcode."
-        ),
-    }
+    return _failure(
+        f"Found products for '{query}' but nutriment data is missing. "
+        "Try a more specific product name or barcode."
+    )

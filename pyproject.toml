@@ -37,3 +37,10 @@ dev = [
 # root and are imported by path, so there is nothing to build a wheel from.
 [tool.uv]
 package = false
+
+# Tests import the root-level modules (server, config, tools/) directly, so
+# the repo root has to be on sys.path. Without this, pytest's rootdir-based
+# insertion does not happen for a non-package project.
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
