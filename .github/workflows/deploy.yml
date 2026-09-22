@@ -53,14 +53,14 @@ jobs:
       - name: Deploy to Cloud Run
         # Private: only the fitness agent's runtime service account holds
         # roles/run.invoker, and it authenticates with an ID token whose
-        # audience is this service's URL. Runs as the fitness agent's
-        # identity because the two are one trust domain.
+        # audience is this service's URL. Runs as its own
+        # identity, holding no secret at all.
         run: |
           gcloud run deploy "$SERVICE" \
             --source . \
             --region "$REGION" \
             --project "$PROJECT_ID" \
-            --service-account "fitness-agent@${PROJECT_ID}.iam.gserviceaccount.com" \
+            --service-account "fitness-mcp@${PROJECT_ID}.iam.gserviceaccount.com" \
             --no-allow-unauthenticated \
             --set-env-vars "OTEL_TRACES_EXPORTER=gcp" \
             --memory 512Mi --cpu 1 --timeout 300 --max-instances 3
