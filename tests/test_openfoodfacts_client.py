@@ -9,7 +9,6 @@ These use a stubbed transport: a test that depends on Open Food Facts being
 up would fail for the very reason this code exists.
 """
 
-import pytest
 import requests
 
 from tools import openfoodfacts_client as off
