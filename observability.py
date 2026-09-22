@@ -16,6 +16,8 @@ Filter at the Collector instead.
 from __future__ import annotations
 
 import functools
+import json
+import logging
 import os
 from typing import Any, Callable
 
@@ -25,9 +27,36 @@ from config import settings
 
 _tracing_configured = False
 
+logger = logging.getLogger("fitness.tool")
+
+_SPAN_ATTRIBUTE_LIMIT = 4000
+
+
+def summarize(value: Any, limit: int = _SPAN_ATTRIBUTE_LIMIT) -> str:
+    """Serialize tool data without allowing large payloads into telemetry.
+
+    Bounded because span attributes are not a data store: an unbounded tool
+    result bloats every trace and can be dropped by the exporter.
+    """
+    serialized = json.dumps(value, default=str, sort_keys=True)
+    if len(serialized) <= limit:
+        return serialized
+    return serialized[:limit] + "... [truncated]"
+
 
 def traced_tool(name: str) -> Callable:
-    """Create a span for one public fitness MCP business tool."""
+    """Create a span for one public fitness MCP business tool.
+
+    Deliberately the same span name, attribute names and failure handling as
+    travel_mcp's `_logged`. They diverged before: this emitted
+    `fitness.tool.<name>` carrying only the tool's name, while travel emitted
+    `mcp.tool.<name>` carrying the arguments and the result. The effect in
+    Cloud Trace was that a travel tool call showed what it was asked and what
+    it answered, and a fitness one showed neither -- so the fitness half of a
+    delegation looked absent even though the tools had run.
+
+    Filter both with `mcp.tool.` now; the service name still tells them apart.
+    """
     def decorator(function: Callable) -> Callable:
         # functools.wraps sets __wrapped__, so inspect.signature() resolves to
         # the real parameters. Copying only __name__/__doc__ leaves FastMCP
@@ -35,11 +64,27 @@ def traced_tool(name: str) -> Callable:
         # {args, kwargs}, which makes every call fail validation.
         @functools.wraps(function)
         def wrapper(*args: Any, **kwargs: Any) -> Any:
-            with trace.get_tracer("fitness.tool").start_as_current_span(
-                f"fitness.tool.{name}",
-                attributes={"fitness.tool.name": name},
-            ):
-                return function(*args, **kwargs)
+            with trace.get_tracer("fitness.mcp").start_as_current_span(
+                f"mcp.tool.{name}",
+                attributes={
+                    "mcp.tool.name": name,
+                    # positional args are unnamed here; the tools are called
+                    # by keyword through FastMCP, so kwargs is the real input
+                    "mcp.tool.input": summarize(kwargs),
+                },
+            ) as span:
+                try:
+                    result = function(*args, **kwargs)
+                    span.set_attribute("mcp.tool.output", summarize(result))
+                    logger.info("mcp_tool_execution_completed tool_name=%s status=success", name)
+                    return result
+                except Exception as error:
+                    span.record_exception(error)
+                    span.set_status(trace.StatusCode.ERROR, str(error))
+                    span.set_attribute("mcp.tool.error", str(error))
+                    logger.info("mcp_tool_execution_completed tool_name=%s status=failure "
+                                "error_type=%s", name, type(error).__name__)
+                    raise
         return wrapper
     return decorator
 
