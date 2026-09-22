@@ -102,6 +102,30 @@ def calculate_tdee_and_macros(
     return result
 
 
+def _logged_result(row_id: int, was_duplicate: bool, described: str) -> Dict[str, Any]:
+    """Shape log_entry's answer, saying so when nothing new was written.
+
+    Still `success`: the entry the caller asked for is in the log, which is
+    what it wanted. Reporting an error would push a model into retrying and
+    make the duplicate worse. `deduplicated` is there so an agent that
+    reads it can avoid telling the user they ate twice.
+    """
+    if was_duplicate:
+        logger.info("log_entry deduplicated: reused entry_id=%s (%s)", row_id, described)
+        return {
+            "status": "success",
+            "entry_id": row_id,
+            "deduplicated": True,
+            "logged": described,
+            "note": (
+                "This identical entry was already logged moments ago; the "
+                "existing record was reused rather than logging it twice."
+            ),
+        }
+    return {"status": "success", "entry_id": row_id, "deduplicated": False,
+            "logged": described}
+
+
 @mcp.tool()
 @traced_tool("log_entry")
 def log_entry(
@@ -131,7 +155,7 @@ def log_entry(
 
     kind = (entry_type or "").lower().strip()
     if kind == "meal":
-        row_id = database.insert_food(
+        row_id, was_duplicate = database.insert_food(
             cleaned_name,
             amount_or_duration,
             calories,
@@ -139,26 +163,20 @@ def log_entry(
             carbs_g,
             fat_g,
         )
-        return {
-            "status": "success",
-            "entry_id": row_id,
-            "logged": (
-                f"Meal: {amount_or_duration}g {cleaned_name} ({calories} kcal)"
-            ),
-        }
+        return _logged_result(
+            row_id, was_duplicate,
+            f"Meal: {amount_or_duration}g {cleaned_name} ({calories} kcal)",
+        )
     if kind == "workout":
-        row_id = database.insert_workout(
+        row_id, was_duplicate = database.insert_workout(
             cleaned_name,
             int(amount_or_duration),
             calories,
         )
-        return {
-            "status": "success",
-            "entry_id": row_id,
-            "logged": (
-                f"Workout: {amount_or_duration} mins of {cleaned_name} (-{calories} kcal)"
-            ),
-        }
+        return _logged_result(
+            row_id, was_duplicate,
+            f"Workout: {amount_or_duration} mins of {cleaned_name} (-{calories} kcal)",
+        )
     return {
         "status": "error",
         "message": "Invalid entry_type. Use 'meal' or 'workout'.",

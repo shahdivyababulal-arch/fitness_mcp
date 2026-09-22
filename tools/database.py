@@ -9,6 +9,16 @@ from typing import Any, Dict, Optional
 
 from config import settings
 
+# How close together two byte-identical entries have to be before the second
+# is treated as a repeat of the first rather than a real second helping.
+#
+# A duplicated A2A delegation replays log_entry seconds apart -- the one
+# observed was 21s. Someone genuinely eating the same thing twice does it
+# minutes or hours apart, so a two-minute window separates the two cases
+# without a client-supplied idempotency key, which the MCP tool signature
+# has no room for.
+DEDUPE_WINDOW_SECONDS = 120
+
 # Configurable so a deployment can point it at a mounted volume; the default
 # sits beside this module. On Cloud Run it lands on the container's writable
 # layer, which means per-instance and lost on restart.
@@ -35,7 +45,11 @@ def init_database() -> None:
                 calories REAL NOT NULL,
                 protein_g REAL DEFAULT 0.0,
                 carbs_g REAL DEFAULT 0.0,
-                fat_g REAL DEFAULT 0.0
+                fat_g REAL DEFAULT 0.0,
+                -- `timestamp` is a date, which is all the daily summary
+                -- needs but too coarse to tell a replay from a second
+                -- helping. This carries the full instant.
+                created_at TEXT
             )
             """
         )
@@ -46,7 +60,8 @@ def init_database() -> None:
                 timestamp TEXT NOT NULL,
                 activity TEXT NOT NULL,
                 duration_min INTEGER NOT NULL,
-                calories_burned REAL NOT NULL
+                calories_burned REAL NOT NULL,
+                created_at TEXT
             )
             """
         )
@@ -66,6 +81,41 @@ def init_database() -> None:
         conn.commit()
 
 
+def _ensure_created_at(conn: sqlite3.Connection) -> None:
+    """Add created_at to databases written before it existed.
+
+    Cloud Run's SQLite is per-instance and ephemeral, so in practice every
+    database is fresh -- but a local file survives across runs, and an
+    upgrade that silently stopped deduplicating would be worse than a
+    migration that runs and does nothing.
+    """
+    for table in ("food_logs", "workout_logs"):
+        columns = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+        if "created_at" not in columns:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN created_at TEXT")
+
+
+def _recent_duplicate(
+    conn: sqlite3.Connection, table: str, where: str, params: tuple
+) -> Optional[int]:
+    """The id of an identical row written inside the dedupe window, if any.
+
+    Rows predating the created_at column have it NULL and never match, so
+    an old database degrades to the previous behaviour rather than
+    collapsing a day's history into one entry.
+    """
+    cutoff = (
+        datetime.datetime.now(datetime.timezone.utc)
+        - datetime.timedelta(seconds=DEDUPE_WINDOW_SECONDS)
+    ).isoformat()
+    row = conn.execute(
+        f"SELECT id FROM {table} WHERE {where} AND created_at IS NOT NULL "
+        f"AND created_at >= ? ORDER BY id DESC LIMIT 1",
+        (*params, cutoff),
+    ).fetchone()
+    return int(row[0]) if row else None
+
+
 def insert_food(
     name: str,
     serving_g: float,
@@ -73,42 +123,77 @@ def insert_food(
     protein_g: float,
     carbs_g: float,
     fat_g: float,
-) -> int:
+) -> tuple[int, bool]:
+    """Log a meal. Returns (row id, whether this repeated a recent entry).
+
+    Idempotent within DEDUPE_WINDOW_SECONDS: a byte-identical meal logged
+    again in that window returns the original row instead of writing a
+    second one. A duplicated A2A delegation replays this tool with the same
+    arguments, and every later daily summary would count the meal twice --
+    silently, because nothing about a double row looks wrong.
+    """
     with _connect() as conn:
+        _ensure_created_at(conn)
+        existing = _recent_duplicate(
+            conn, "food_logs",
+            "item_name = ? AND serving_g = ? AND calories = ? "
+            "AND protein_g = ? AND carbs_g = ? AND fat_g = ?",
+            (name, serving_g, calories, protein_g, carbs_g, fat_g),
+        )
+        if existing is not None:
+            return existing, True
+
         cursor = conn.cursor()
         cursor.execute(
             """
             INSERT INTO food_logs (
-                timestamp, item_name, serving_g, calories, protein_g, carbs_g, fat_g
+                timestamp, item_name, serving_g, calories, protein_g, carbs_g,
+                fat_g, created_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
-                datetime.date.today().isoformat(),
-                name,
-                serving_g,
-                calories,
-                protein_g,
-                carbs_g,
-                fat_g,
+                datetime.date.today().isoformat(), name, serving_g, calories,
+                protein_g, carbs_g, fat_g,
+                datetime.datetime.now(datetime.timezone.utc).isoformat(),
             ),
         )
         conn.commit()
-        return int(cursor.lastrowid)
+        return int(cursor.lastrowid), False
 
 
-def insert_workout(activity: str, duration_min: int, calories: float) -> int:
+def insert_workout(
+    activity: str, duration_min: int, calories: float
+) -> tuple[int, bool]:
+    """Log a workout. Returns (row id, whether this repeated a recent entry).
+
+    Same idempotency as insert_food, for the same reason.
+    """
     with _connect() as conn:
+        _ensure_created_at(conn)
+        existing = _recent_duplicate(
+            conn, "workout_logs",
+            "activity = ? AND duration_min = ? AND calories_burned = ?",
+            (activity, duration_min, calories),
+        )
+        if existing is not None:
+            return existing, True
+
         cursor = conn.cursor()
         cursor.execute(
             """
-            INSERT INTO workout_logs (timestamp, activity, duration_min, calories_burned)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO workout_logs (
+                timestamp, activity, duration_min, calories_burned, created_at
+            )
+            VALUES (?, ?, ?, ?, ?)
             """,
-            (datetime.date.today().isoformat(), activity, duration_min, calories),
+            (
+                datetime.date.today().isoformat(), activity, duration_min, calories,
+                datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            ),
         )
         conn.commit()
-        return int(cursor.lastrowid)
+        return int(cursor.lastrowid), False
 
 
 def upsert_user_targets(
