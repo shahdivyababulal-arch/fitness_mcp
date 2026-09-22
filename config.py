@@ -115,9 +115,6 @@ class Settings:
                                    "true")).lower() in {"1", "true", "yes"}
     otel_service_name: str = str(value("observability", "service_name",
                                        "OTEL_SERVICE_NAME", "fitness-mcp"))
-    otel_exporter_otlp_endpoint: str = str(value(
-        "observability", "otlp_endpoint",
-        "OTEL_EXPORTER_OTLP_ENDPOINT", "http://127.0.0.1:4318"))
 
 
 settings = Settings()

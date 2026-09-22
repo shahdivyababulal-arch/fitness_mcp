@@ -23,7 +23,6 @@ dependencies = [
     # server is now free of that cap and can move ahead of the agents.
     "opentelemetry-api==1.42.1",
     "opentelemetry-sdk==1.42.1",
-    "opentelemetry-exporter-otlp-proto-http==1.42.1",
     "opentelemetry-instrumentation-asgi==0.63b1",
     "opentelemetry-exporter-gcp-trace>=1.9.0",
 ]

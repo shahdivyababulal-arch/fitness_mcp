@@ -11,6 +11,9 @@ Context propagation is inbound-only. `wrap_asgi_app` extracts the W3C
 trace instead of starting their own. Spans are never filtered in-process --
 dropping a parent orphans its children, which breaks the cross-service trace.
 Filter at the Collector instead.
+
+Cloud Trace is the only export backend. Set `OTEL_ENABLED=false` to run with
+tracing off; there is no second backend to select between.
 """
 
 from __future__ import annotations
@@ -90,12 +93,17 @@ def traced_tool(name: str) -> Callable:
 
 
 def configure_tracing(service_name: str | None = None) -> None:
-    """Install the tracer provider for this service."""
+    """Export this server's spans to Cloud Trace.
+
+    Requires application default credentials: in Cloud Run that is the
+    runtime service account, and locally `gcloud auth application-default
+    login`. Without them, run with `OTEL_ENABLED=false`.
+    """
     global _tracing_configured
     if _tracing_configured or not settings.otel_enabled:
         return
 
-    from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+    from opentelemetry.exporter.cloud_trace import CloudTraceSpanExporter
     from opentelemetry.sdk.resources import Resource
     from opentelemetry.sdk.trace import TracerProvider
     from opentelemetry.sdk.trace.export import BatchSpanProcessor
@@ -108,19 +116,8 @@ def configure_tracing(service_name: str | None = None) -> None:
     os.environ.setdefault("OTEL_TRACES_SAMPLER", "parentbased_traceidratio")
     os.environ.setdefault("OTEL_TRACES_SAMPLER_ARG", "1.0")
 
-    # Cloud Run has no Jaeger to export to. Selecting the backend by an
-    # explicit env var rather than sniffing for GCP keeps the choice testable
-    # locally -- the same reasoning as gs:// config URIs.
-    if os.getenv("OTEL_TRACES_EXPORTER", "").lower() == "gcp":
-        from opentelemetry.exporter.cloud_trace import CloudTraceSpanExporter
-
-        exporter = CloudTraceSpanExporter()
-    else:
-        endpoint = settings.otel_exporter_otlp_endpoint.rstrip("/")
-        exporter = OTLPSpanExporter(endpoint=f"{endpoint}/v1/traces")
-
     provider = TracerProvider(resource=Resource.create({"service.name": resolved}))
-    provider.add_span_processor(BatchSpanProcessor(exporter))
+    provider.add_span_processor(BatchSpanProcessor(CloudTraceSpanExporter()))
     trace.set_tracer_provider(provider)
     _tracing_configured = True
 

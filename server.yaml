@@ -26,6 +26,3 @@ data:
 observability:
   enabled: true
   service_name: fitness-mcp
-  # Jaeger's OTLP/HTTP receiver for local runs. In Cloud Run this is ignored:
-  # OTEL_TRACES_EXPORTER=gcp selects the Cloud Trace exporter instead.
-  otlp_endpoint: http://127.0.0.1:4318
